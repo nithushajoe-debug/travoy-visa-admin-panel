@@ -1,0 +1,257 @@
+import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { prisma } from '@travoy/database';
+import { PERMISSIONS } from '@travoy/shared';
+import { CreateDraftDto } from './dto/create-draft.dto';
+import { ApproveDraftDto } from './dto/approve-draft.dto';
+
+@Injectable()
+export class DraftsService {
+  async createDraft(dto: CreateDraftDto, user: any) {
+    if (!user.permissions.includes(PERMISSIONS.AI_GENERATE_DRAFTS)) {
+      throw new ForbiddenException('Insufficient permissions');
+    }
+
+    // Verify case access
+    const caseData = await this.verifyCaseAccess(dto.caseId, user);
+
+    // Get case details for AI context
+    const fullCase = await prisma.case.findUnique({
+      where: { id: dto.caseId },
+      include: {
+        contact: true,
+        documents: true,
+      },
+    });
+
+    // Generate AI content (stub implementation)
+    const aiContent = await this.generateAIContent(dto, fullCase);
+
+    const draft = await prisma.draft.create({
+      data: {
+        caseId: dto.caseId,
+        type: dto.type,
+        title: this.generateTitle(dto.type, fullCase),
+        bodyMd: aiContent,
+        createdBy: user.id,
+      },
+    });
+
+    // Log activity
+    await prisma.activity.create({
+      data: {
+        caseId: dto.caseId,
+        type: 'NOTE',
+        title: 'AI draft created',
+        content: `${dto.type} draft generated`,
+        createdBy: user.id,
+      },
+    });
+
+    return draft;
+  }
+
+  async getCaseDrafts(caseId: string, user: any) {
+    // Verify case access
+    await this.verifyCaseAccess(caseId, user);
+
+    const drafts = await prisma.draft.findMany({
+      where: { caseId },
+      include: {
+        creator: {
+          select: {
+            name: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return drafts;
+  }
+
+  async approveDraft(id: string, dto: ApproveDraftDto, user: any) {
+    if (!user.permissions.includes(PERMISSIONS.AI_APPROVE_DRAFTS)) {
+      throw new ForbiddenException('Insufficient permissions');
+    }
+
+    const draft = await prisma.draft.findUnique({
+      where: { id },
+      include: { case: true },
+    });
+
+    if (!draft) {
+      throw new NotFoundException('Draft not found');
+    }
+
+    // Verify case access
+    await this.verifyCaseAccess(draft.caseId, user);
+
+    const updatedDraft = await prisma.draft.update({
+      where: { id },
+      data: {
+        status: dto.approved ? 'APPROVED' : 'REJECTED',
+        reviewedBy: user.id,
+        reviewedAt: new Date(),
+      },
+    });
+
+    // Log activity
+    await prisma.activity.create({
+      data: {
+        caseId: draft.caseId,
+        type: 'NOTE',
+        title: `Draft ${dto.approved ? 'approved' : 'rejected'}`,
+        content: `${draft.type} draft ${dto.approved ? 'approved for sending' : 'rejected'}`,
+        createdBy: user.id,
+      },
+    });
+
+    return updatedDraft;
+  }
+
+  private async verifyCaseAccess(caseId: string, user: any) {
+    const canViewAll = user.permissions.includes(PERMISSIONS.CASES_VIEW_ALL);
+    
+    const where: any = { id: caseId };
+    
+    if (!canViewAll) {
+      where.assignedTo = user.id;
+    }
+
+    const caseData = await prisma.case.findFirst({
+      where,
+      select: { id: true },
+    });
+
+    if (!caseData) {
+      throw new NotFoundException('Case not found or access denied');
+    }
+
+    return caseData;
+  }
+
+  private async generateAIContent(dto: CreateDraftDto, caseData: any): Promise<string> {
+    // Stub AI implementation - in real app, this would call AI service
+    const { contact, visaType, country } = caseData;
+    
+    switch (dto.type) {
+      case 'COVER_LETTER':
+        return this.generateCoverLetter(contact, visaType, country, dto.prompt);
+      case 'INVITATION_LETTER':
+        return this.generateInvitationLetter(contact, visaType, country, dto.prompt);
+      case 'EMAIL':
+        return this.generateEmail(contact, dto.prompt);
+      default:
+        return `# ${dto.type}\n\n${dto.prompt}\n\n*This is a generated draft. Please review before sending.*`;
+    }
+  }
+
+  private generateCoverLetter(contact: any, visaType: string, country: string, prompt: string): string {
+    return `# Cover Letter for ${visaType} Application
+
+**Applicant:** ${contact.firstName} ${contact.lastName}  
+**Email:** ${contact.email}  
+**Phone:** ${contact.phone}  
+
+---
+
+## To Whom It May Concern,
+
+I am writing to support the ${visaType} application for ${country} submitted by ${contact.firstName} ${contact.lastName}.
+
+${prompt}
+
+## Supporting Documents
+
+The following documents are enclosed with this application:
+
+- [ ] Passport bio-data pages
+- [ ] Completed application form
+- [ ] Financial evidence
+- [ ] Travel itinerary
+- [ ] Accommodation bookings
+
+## Declaration
+
+I confirm that all information provided is true and accurate to the best of my knowledge.
+
+Yours sincerely,
+
+**${contact.firstName} ${contact.lastName}**
+
+---
+
+*This letter was generated by Travoy AI Assistant. Please review and customize as needed.*`;
+  }
+
+  private generateInvitationLetter(contact: any, visaType: string, country: string, prompt: string): string {
+    return `# Invitation Letter
+
+**To:** ${contact.firstName} ${contact.lastName}  
+**From:** [SPONSOR_NAME]  
+**Date:** ${new Date().toLocaleDateString('en-GB')}  
+
+---
+
+## Invitation Details
+
+Dear ${contact.firstName},
+
+${prompt}
+
+## Sponsor Information
+
+- **Name:** [SPONSOR_NAME]
+- **Address:** [SPONSOR_ADDRESS]
+- **Relationship:** [RELATIONSHIP]
+- **Contact:** [SPONSOR_CONTACT]
+
+## Visit Details
+
+- **Purpose:** [PURPOSE_OF_VISIT]
+- **Duration:** [VISIT_DURATION]
+- **Accommodation:** [ACCOMMODATION_DETAILS]
+
+I confirm that I will provide accommodation and support during the visit.
+
+Yours sincerely,
+
+**[SPONSOR_NAME]**
+
+---
+
+*This letter was generated by Travoy AI Assistant. Please review and customize as needed.*`;
+  }
+
+  private generateEmail(contact: any, prompt: string): string {
+    return `**Subject:** Regarding Your Visa Application
+
+Dear ${contact.firstName},
+
+${prompt}
+
+If you have any questions, please don't hesitate to contact us.
+
+Best regards,  
+The Travoy Team
+
+---
+
+*This email was generated by Travoy AI Assistant. Please review before sending.*`;
+  }
+
+  private generateTitle(type: string, caseData: any): string {
+    const { contact, visaType, country } = caseData;
+    
+    switch (type) {
+      case 'COVER_LETTER':
+        return `Cover Letter - ${visaType} (${contact.firstName} ${contact.lastName})`;
+      case 'INVITATION_LETTER':
+        return `Invitation Letter - ${country} Visit (${contact.firstName} ${contact.lastName})`;
+      case 'EMAIL':
+        return `Email - ${contact.firstName} ${contact.lastName}`;
+      default:
+        return `${type} - ${contact.firstName} ${contact.lastName}`;
+    }
+  }
+}
